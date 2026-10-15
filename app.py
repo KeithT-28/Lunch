@@ -39,7 +39,7 @@ MRT_STATIONS = [
 ]
 OVERRIDE_COLUMNS = [
     "id", "name", "address_override", "cuisine_override", "budget_band",
-    "personal_rating", "notes", "website_override", "opening_hours_override",
+    "personal_rating", "notes", "website_override", "opening_hours_override", "image_url_override",
 ]
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🍜", layout="wide")
@@ -59,7 +59,8 @@ div[data-testid="stMetric"] {background:rgba(100,120,120,.08);padding:10px;borde
 }
 div[data-testid="stExpander"] {border-radius:12px;}
 .small-muted {color:#777;font-size:.85rem;}
-.price-badge {display:inline-block;background:#e0eee5;color:#205a3e;border-radius:8px;padding:3px 10px;font-weight:750;font-size:1rem;letter-spacing:.04em;}
+.price-badge {display:inline-block;background:#e0eee5;color:#205a3e;border-radius:7px;padding:2px 8px;font-weight:750;font-size:.88rem;letter-spacing:.03em;}
+.food-thumb {width:76px;height:76px;border-radius:12px;background:#f2f4f3;display:flex;align-items:center;justify-content:center;font-size:1.8rem;}
 .place-meta {color:#737780;font-size:.9rem;line-height:1.5;}
 div[data-testid="stRadio"] > div {gap:.35rem;}
 </style>
@@ -128,6 +129,7 @@ def apply_overrides(places: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ("cuisine_override", "cuisine"),
             ("website_override", "website"),
             ("opening_hours_override", "opening_hours"),
+            ("image_url_override", "image_url"),
         ]:
             val = str(row.get(source, "")).strip()
             if val:
@@ -226,6 +228,7 @@ def discover_places(lat: float, lon: float, radius_m: int) -> list[dict[str, Any
                         "website": tags.get("website") or tags.get("contact:website", ""),
                         "phone": tags.get("phone") or tags.get("contact:phone", ""),
                         "opening_hours": tags.get("opening_hours", ""),
+                        "image_url": tags.get("image") or tags.get("image_url") or "",
                         "source_price": tags.get("price", ""),
                         "osm_url": f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
                     })
@@ -408,32 +411,42 @@ with discover_tab:
             cuisine = place.get("cuisine") or "Cuisine not listed"
             hours = place.get("opening_hours") or "Hours not listed"
             address = place.get("address") or "Address not listed"
+            image_url = str(place.get("image_url") or "").strip()
             with st.container(border=True):
-                left, right = st.columns([4, 1])
-                with left:
+                image_col, info_col, heart_col = st.columns([0.85, 4.0, 0.45], vertical_alignment="top")
+                with image_col:
+                    if image_url.startswith(("https://", "http://")):
+                        try:
+                            st.image(image_url, width=76)
+                        except Exception:
+                            st.markdown("<div class='food-thumb'>🍜</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown("<div class='food-thumb'>🍜</div>", unsafe_allow_html=True)
+                with info_col:
                     st.markdown(f"**{place['name']}**")
                     st.markdown(f"<div class='place-meta'>{cuisine} · {place['distance_km'] * 1000:.0f} m away</div>", unsafe_allow_html=True)
-                with right:
                     st.markdown(price_html, unsafe_allow_html=True)
-                if place.get("personal_rating"):
-                    st.caption(f"Your rating: {place['personal_rating']}/5")
-                with st.expander("Details and directions", expanded=False):
+                    if place.get("personal_rating"):
+                        st.caption(f"Your rating: {place['personal_rating']}/5")
+                with heart_col:
+                    if st.button("♥" if is_saved else "♡", key=f"save_{place['id']}", help="Remove from saved places" if is_saved else "Save this place"):
+                        if is_saved:
+                            st.session_state.favourites.remove(place["id"])
+                        else:
+                            st.session_state.favourites.add(place["id"])
+                        st.rerun()
+                with st.expander("Details", expanded=False):
                     st.write(f"**Address:** {address}")
                     st.write(f"**Opening hours:** {hours}")
                     if price in PRICE_GUIDE:
                         st.write(f"**Your estimated spend:** {PRICE_GUIDE[price]} per person")
                     if place.get("notes"):
                         st.write(f"**Your note:** {place['notes']}")
+                    if place.get("website"):
+                        st.markdown(f"[Restaurant website ↗]({place['website']})")
                     st.markdown(f"[Check Google Maps ↗]({maps_url(place)}) · [OpenStreetMap source ↗]({place['osm_url']})")
-                a, b = st.columns(2)
-                with a:
-                    if st.button("♥ Saved" if is_saved else "♡ Save", key=f"save_{place['id']}", use_container_width=True):
-                        if is_saved:
-                            st.session_state.favourites.remove(place["id"])
-                        else:
-                            st.session_state.favourites.add(place["id"])
-                        st.rerun()
-                with b:
+                    if image_url:
+                        st.caption("Image supplied by mapped data or your own image URL.")
                     if st.button("Edit details", key=f"editgo_{place['id']}", use_container_width=True):
                         st.session_state.edit_place_id = place["id"]
                         st.info("Open Manage Places to edit this listing.")
@@ -503,6 +516,8 @@ with manage_tab:
             notes = st.text_area("Notes / what to order", value=str(old.get("notes", "")), placeholder="e.g. try the dry ramen")
             website = st.text_input("Website", value=str(old.get("website_override") or selected.get("website", "")))
             hours = st.text_input("Opening hours", value=str(old.get("opening_hours_override") or selected.get("opening_hours", "")))
+            image_url = st.text_input("Photo URL (optional)", value=str(old.get("image_url_override") or selected.get("image_url", "")), placeholder="https://…")
+            st.caption("Use a direct image URL you have permission to use. If no photo is available, the card shows a simple placeholder.")
             if st.form_submit_button("Save corrections", type="primary"):
                 old_df = normalize_overrides(st.session_state.overrides)
                 old_df = old_df[old_df["id"] != selected_id]
@@ -511,7 +526,7 @@ with manage_tab:
                     "address_override": addr, "cuisine_override": cuisine,
                     "budget_band": budget, "personal_rating": rating,
                     "notes": notes, "website_override": website,
-                    "opening_hours_override": hours,
+                    "opening_hours_override": hours, "image_url_override": image_url,
                 }])
                 st.session_state.overrides = normalize_overrides(pd.concat([old_df, new], ignore_index=True))
                 st.session_state.places = apply_overrides(st.session_state.places)
@@ -527,6 +542,7 @@ with manage_tab:
 
 with st.expander("Data sources, limitations and privacy"):
     st.write("Restaurant discovery uses OpenStreetMap community data via Overpass. Office/building lookup uses OneMap Search. Search services are public and can occasionally be busy.")
+    st.write("Restaurant photos are shown only when an image URL is present in OpenStreetMap tags or you add one yourself in Manage Places; the app does not scrape Google Maps or automatically fetch Google restaurant photos.")
     st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands shown on cards are personal estimates entered by you; public map data rarely includes reliable meal prices. Unknown prices are labelled rather than guessed.")
     st.write("Your typed location is sent to OneMap to find coordinates. The app does not request your phone's GPS.")
     st.markdown("[OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [OneMap API terms](https://www.onemap.gov.sg/legal/apitermsofservice.html) · [Google Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)")
