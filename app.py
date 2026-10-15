@@ -272,7 +272,10 @@ def commons_search_photo(search_term: str, mode: str = "place") -> dict[str, str
     except (requests.RequestException, ValueError, TypeError):
         return None
 
-    term_words = {w.casefold() for w in term.replace("-", " ").split() if len(w) > 2}
+    # For venue photos, only accept a strict match in the Commons file title.
+    # Do not match against long descriptions: they often mention unrelated places.
+    normalise = lambda value: " ".join("".join(ch.casefold() if ch.isalnum() else " " for ch in value.replace("File:", "")).split())
+    term_normalised = normalise(term)
     for page in pages.values():
         title = str(page.get("title", ""))
         info_list = page.get("imageinfo", [])
@@ -280,9 +283,11 @@ def commons_search_photo(search_term: str, mode: str = "place") -> dict[str, str
             continue
         info = info_list[0]
         meta = info.get("extmetadata", {})
-        description = (title + " " + str(meta.get("ImageDescription", {}).get("value", ""))).casefold()
-        if mode == "place" and (not term_words or not all(word in description for word in term_words)):
-            continue
+        title_normalised = normalise(title)
+        if mode == "place":
+            # Exact name phrase only; otherwise a wrong photo is worse than no photo.
+            if not term_normalised or term_normalised not in title_normalised:
+                continue
         thumb = info.get("thumburl") or info.get("url")
         if not thumb or not str(thumb).startswith("https://"):
             continue
@@ -298,7 +303,11 @@ def commons_search_photo(search_term: str, mode: str = "place") -> dict[str, str
 
 
 def photo_for_place(place: dict[str, Any], lookup_place_photo: bool = False) -> dict[str, str] | None:
-    """Prefer OSM/user photos, then a possible Commons match, then cuisine imagery."""
+    """Return only a mapped/user photo or a strict venue-name match.
+
+    Deliberately do not use generic cuisine images as restaurant thumbnails: users
+    can reasonably mistake those for real photos of the venue.
+    """
     direct = str(place.get("image_url") or "").strip()
     if direct.startswith("https://"):
         return {"url": direct, "page_url": place.get("osm_url", "https://www.openstreetmap.org/"),
@@ -308,26 +317,7 @@ def photo_for_place(place: dict[str, Any], lookup_place_photo: bool = False) -> 
         match = commons_search_photo(str(place.get("name", "")), "place")
         if match:
             return match
-    cuisine = str(place.get("cuisine") or "").strip().casefold()
-    if any(x in cuisine for x in ("singapore", "malay", "hawker", "chinese")):
-        query = "Singapore hawker food"
-    elif any(x in cuisine for x in ("japanese", "sushi", "ramen")):
-        query = "Japanese cuisine food"
-    elif "korean" in cuisine:
-        query = "Korean cuisine food"
-    elif "indian" in cuisine:
-        query = "Indian cuisine food"
-    elif "thai" in cuisine:
-        query = "Thai cuisine food"
-    elif "vietnamese" in cuisine:
-        query = "Vietnamese cuisine food"
-    elif any(x in cuisine for x in ("italian", "pizza", "pasta")):
-        query = "Italian cuisine food"
-    elif any(x in cuisine for x in ("western", "burger", "american")):
-        query = "burger western food"
-    else:
-        query = "restaurant meal food"
-    return commons_search_photo(query, "cuisine")
+    return None
 
 
 def maps_url(place: dict[str, Any]) -> str:
@@ -636,7 +626,7 @@ with manage_tab:
 
 with st.expander("Data sources, limitations and privacy"):
     st.write("Restaurant discovery uses OpenStreetMap community data via Overpass. Office/building lookup uses OneMap Search. Search services are public and can occasionally be busy.")
-    st.write("Photos prefer image URLs present in OpenStreetMap tags or ones you add yourself. If none exists, the app may search Wikimedia Commons for a possible restaurant-name match on the first few cards, then use a cached illustrative cuisine photo when available. Commons matches can be imperfect; illustrative images are labelled and are not claimed to depict the restaurant. Photo source links and available attribution/licence metadata appear in Details. The app does not scrape Google Maps.")
+    st.write("Photos use image URLs present in OpenStreetMap tags, ones you add yourself, or a strict restaurant-name match from Wikimedia Commons. Generic cuisine photos are not used as restaurant thumbnails, because they can be misleading. When no reliable match is available, the app shows a food-icon placeholder. Photo source links and available attribution/licence metadata appear in Details. The app does not scrape Google Maps.")
     st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands shown on cards are personal estimates entered by you; public map data rarely includes reliable meal prices. Unknown prices are labelled rather than guessed.")
     st.write("Your typed location is sent to OneMap to find coordinates. The app does not request your phone's GPS.")
     st.markdown("[OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [OneMap API terms](https://www.onemap.gov.sg/legal/apitermsofservice.html) · [Google Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)")
