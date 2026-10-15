@@ -15,6 +15,26 @@ OVERPASS_URLS = [
     "https://overpass.private.coffee/api/interpreter",
 ]
 BUDGET_BANDS = ["Unknown", "Under S$10", "S$10–20", "S$21–40", "Over S$40"]
+MRT_STATIONS = [
+    "Admiralty", "Aljunied", "Ang Mo Kio", "Bakau", "Balmoral", "Bartley", "Bayfront",
+    "Beauty World", "Bedok", "Bedok North", "Bedok Reservoir", "Bencoolen", "Bendemeer",
+    "Boon Keng", "Boon Lay", "Botanic Gardens", "Braddell", "Bras Basah", "Bright Hill",
+    "Bugis", "Buangkok", "Caldecott", "Canberra", "Cashew", "Changi Airport", "Chinatown",
+    "Chinese Garden", "Choa Chu Kang", "City Hall", "Clarke Quay", "Clementi", "Commonwealth",
+    "Dakota", "Dhoby Ghaut", "Dover", "Downtown", "Eunos", "Expo", "Farrer Park",
+    "Farrer Road", "Fort Canning", "Gardens by the Bay", "Geylang Bahru", "Great World",
+    "HarbourFront", "Haw Par Villa", "Hillview", "Holland Village", "Hougang", "Jalan Besar",
+    "Joo Koon", "Kaki Bukit", "Kallang", "Kembangan", "Kent Ridge", "Khatib", "King Albert Park",
+    "Kovan", " Labrador Park", "Lakeside", "Lavender", "Little India", "MacPherson", "Marina Bay",
+    "Marina South Pier", "Marymount", "Mattar", "Mayflower", "Newton", "Nicoll Highway",
+    "one-north", "Orchard", "Orchard Boulevard", "Outram Park", "Pasir Panjang", "Pasir Ris",
+    "Paya Lebar", "Pioneer", "Potong Pasir", "Promenade", "Queenstown", "Raffles Place",
+    "Redhill", "Rochor", "Sengkang", "Serangoon", "Shenton Way", "Simei", "Sixth Avenue",
+    "Somerset", "Stadium", "Stevens", "Tai Seng", "Tampines", "Tampines East", "Tampines West",
+    "Tanah Merah", "Tanjong Pagar", "Telok Ayer", "Telok Blangah", "Tiong Bahru", "Toa Payoh",
+    "Tuas Crescent", "Tuas Link", "Tuas West Road", "Ubi", "Upper Changi", "Upper Thomson",
+    "Woodlands", "Woodlands North", "Woodlands South", "Yew Tee", "Yio Chu Kang", "Yishun",
+]
 OVERRIDE_COLUMNS = [
     "id", "name", "address_override", "cuisine_override", "budget_band",
     "personal_rating", "notes", "website_override", "opening_hours_override",
@@ -211,7 +231,12 @@ def maps_url(place: dict[str, Any]) -> str:
 
 with st.sidebar:
     st.subheader("Lunch search")
-    office_query = st.text_input("Office / building / MRT", placeholder="e.g. Raffles Place MRT")
+    location_mode = st.radio("Start from", ["Choose an MRT station", "Type an office / building"], index=0)
+    if location_mode == "Choose an MRT station":
+        selected_station = st.selectbox("MRT station", sorted(set(x.strip() for x in MRT_STATIONS)), index=sorted(set(x.strip() for x in MRT_STATIONS)).index("Raffles Place"))
+        office_query = f"{selected_station} MRT Station"
+    else:
+        office_query = st.text_input("Office / building name", placeholder="e.g. One Raffles Place")
     radius_choice = st.selectbox(
         "Walking radius",
         ["5 min · 400 m", "10 min · 800 m", "15 min · 1.2 km", "20 min · 1.6 km"],
@@ -231,7 +256,7 @@ with st.sidebar:
 
 if search:
     if not office_query.strip():
-        st.warning("Enter an office location or nearby MRT station in the sidebar.")
+        st.warning("Choose an MRT station or enter an office/building name in the sidebar.")
     else:
         try:
             with st.spinner("Finding your office location…"):
@@ -289,7 +314,7 @@ with discover_tab:
         st.map(map_df, latitude="lat", longitude="lon")
 
     if not places:
-        st.info("Enter your office location in the sidebar and tap **Find food nearby**.")
+        st.info("Choose an MRT station or enter your office/building in the sidebar, then tap **Find food nearby**.")
     elif not filtered:
         st.info("No places match these filters. Try widening the filters.")
     else:
