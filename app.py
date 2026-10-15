@@ -204,7 +204,25 @@ with st.sidebar:
         ["Restaurant", "Cafe", "Fast Food", "Food Court", "Bakery", "Ice Cream", "Pub", "Bar"],
         default=["Restaurant", "Cafe", "Fast Food", "Food Court", "Bakery"],
     )
-    cuisine_filter = st.text_input("Cuisine keyword", placeholder="e.g. Japanese")
+    # Cuisine choices are populated from mapped details in the current search.
+    discovered_cuisines = sorted({
+        item.strip()
+        for place in st.session_state.places
+        for item in place.get("cuisine", "").split(",")
+        if item.strip()
+    })
+    cuisine_filter = st.multiselect(
+        "Cuisine type",
+        discovered_cuisines,
+        default=[],
+        help="Options depend on cuisine information available in OpenStreetMap.",
+    )
+    price_filter = st.selectbox(
+        "Price information",
+        ["Any price information", "Price listed only", "Price not listed"],
+        index=0,
+        help="Only uses price data explicitly tagged in OpenStreetMap; many places may not have it.",
+    )
     name_filter = st.text_input("Name contains", placeholder="e.g. toast")
     show_map = st.checkbox("Show map (may load slower)", value=False)
     search_button = st.button("🔎 Find food nearby", type="primary", use_container_width=True)
@@ -246,10 +264,24 @@ if places:
     for place in places:
         cat = place["category"].lower()
         category_match = not selected_cats or any(selected in cat or cat in selected for selected in selected_cats)
-        keyword = cuisine_filter.strip().lower()
-        cuisine_match = not keyword or keyword in (place["name"] + " " + place["category"] + " " + place["cuisine"]).lower()
+        place_cuisines = {
+            item.strip().lower()
+            for item in place.get("cuisine", "").split(",")
+            if item.strip()
+        }
+        selected_cuisines = {item.lower() for item in cuisine_filter}
+        cuisine_match = not selected_cuisines or bool(place_cuisines & selected_cuisines)
+
+        has_price = bool(place.get("price") and str(place["price"]).strip())
+        if price_filter == "Price listed only":
+            price_match = has_price
+        elif price_filter == "Price not listed":
+            price_match = not has_price
+        else:
+            price_match = True
+
         name_match = not name_filter.strip() or name_filter.strip().lower() in place["name"].lower()
-        if category_match and cuisine_match and name_match:
+        if category_match and cuisine_match and price_match and name_match:
             filtered.append(place)
 
     favorites_tab, all_tab = st.tabs([
@@ -280,13 +312,13 @@ if places:
                 saved = place["id"] in st.session_state.favorites
                 title = f"{'⭐ ' if saved else ''}{place['name']} · {place['distance_km']:.2f} km"
                 with st.expander(title, expanded=False):
-                    st.write(f"**Type:** {place['category']}" + (f" · **Cuisine:** {place['cuisine']}" if place["cuisine"] else ""))
+                    st.write(f"**Food type:** {place['category']}")
+                    st.write(f"**Cuisine:** {place['cuisine'] if place['cuisine'] else 'Not listed'}")
                     st.write(f"**Address:** {place['address']}")
                     details = []
                     if place["opening_hours"]:
                         details.append(f"Hours: {place['opening_hours']}")
-                    if place["price"]:
-                        details.append(f"Price: {place['price']}")
+                    details.append(f"Price range: {place['price'] if place['price'] else 'Not listed'}")
                     if place["phone"]:
                         details.append(f"Phone: {place['phone']}")
                     st.caption(" · ".join(details) if details else "Hours, price and contact details not listed")
@@ -309,7 +341,9 @@ if places:
         else:
             for place in fav_places:
                 with st.expander(f"⭐ {place['name']} · {place['distance_km']:.2f} km", expanded=False):
-                    st.write(f"{place['category']} · {place['address']}")
+                    st.write(f"**Food type:** {place['category']} · **Cuisine:** {place['cuisine'] if place['cuisine'] else 'Not listed'}")
+                    st.write(f"**Price range:** {place['price'] if place['price'] else 'Not listed'}")
+                    st.write(f"**Address:** {place['address']}")
                     st.markdown(f"[Open in Google Maps](https://www.google.com/maps/search/?api=1&query={place['lat']},{place['lon']})")
                     if st.button("Remove saved place", key=f"remove_{place['id']}"):
                         st.session_state.favorites.remove(place["id"])
@@ -333,13 +367,13 @@ else:
     st.markdown("### Built for quick lunch decisions")
     c1, c2, c3 = st.columns(3)
     c1.markdown("**📍 Nearby search**\n\nSearch around your office or MRT station.")
-    c2.markdown("**🔎 Simple filters**\n\nNarrow results by food type and keywords.")
+    c2.markdown("**🔎 Cuisine & price filters**\n\nNarrow results by cuisine and available price information.")
     c3.markdown("**🎲 Random lunch**\n\nLet the app choose from your results.")
 
 with st.expander("About the data and privacy"):
     st.write(
         "Location search uses OpenStreetMap's Nominatim service and nearby food discovery uses the Overpass API. "
         "Your typed location is sent to Nominatim to find coordinates. The app does not request your phone GPS. "
-        "Community data may be incomplete, and current opening status is not verified."
+        "Community data may be incomplete, and current opening status is not verified. Cuisine and price ranges appear only when explicitly tagged; many places may show 'Not listed'."
     )
     st.write("Favourites currently last for the active Streamlit session. Permanent cross-device storage is a future improvement.")
