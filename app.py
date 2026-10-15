@@ -153,68 +153,79 @@ def geocode_place(query: str) -> dict[str, Any] | None:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def discover_places(lat: float, lon: float, radius_m: int) -> list[dict[str, Any]]:
+    """Discover mapped food places, rotating through public Overpass servers."""
     query = f"""
-    [out:json][timeout:20];
+    [out:json][timeout:18];
     (
       nwr(around:{radius_m},{lat},{lon})["amenity"~"^(restaurant|cafe|fast_food|food_court|ice_cream)$"];
       nwr(around:{radius_m},{lat},{lon})["shop"~"^(bakery|confectionery|deli|pastry)$"];
     );
     out center tags;
     """
-    last_error = None
+    last_error = "All public data servers are unavailable."
+    transient_statuses = {429, 502, 503, 504}
     for endpoint in OVERPASS_URLS:
-        try:
-            response = requests.post(
-                endpoint, data={"data": query},
-                headers={"User-Agent": USER_AGENT}, timeout=22
-            )
-            if response.status_code in (429, 502, 503, 504):
-                last_error = f"HTTP {response.status_code}"
-                continue
-            response.raise_for_status()
-            elements = response.json().get("elements", [])
-            places = []
-            seen = set()
-            for item in elements:
-                tags = item.get("tags", {})
-                name = tags.get("name") or tags.get("brand")
-                if not name:
-                    continue
-                if "lat" in item and "lon" in item:
-                    p_lat, p_lon = float(item["lat"]), float(item["lon"])
-                elif "center" in item:
-                    p_lat, p_lon = float(item["center"]["lat"]), float(item["center"]["lon"])
+        # One retry for transient server load, then fail over to the next endpoint.
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    endpoint, data={"data": query},
+                    headers={"User-Agent": USER_AGENT}, timeout=(5, 20)
+                )
+                if response.status_code in transient_statuses:
+                    last_error = f"HTTP {response.status_code} from a restaurant data server"
+                    if attempt == 0:
+                        time.sleep(0.8)
+                        continue
+                    break
+                response.raise_for_status()
+                payload = response.json()
+                elements = payload.get("elements", [])
+                places = []
+                seen = set()
+                for item in elements:
+                    tags = item.get("tags", {})
+                    name = tags.get("name") or tags.get("brand")
+                    if not name:
+                        continue
+                    if "lat" in item and "lon" in item:
+                        p_lat, p_lon = float(item["lat"]), float(item["lon"])
+                    elif "center" in item:
+                        p_lat, p_lon = float(item["center"]["lat"]), float(item["center"]["lon"])
+                    else:
+                        continue
+                    osm_type, osm_id = item.get("type", "node"), item.get("id")
+                    uid = f"{osm_type}/{osm_id}"
+                    if uid in seen:
+                        continue
+                    seen.add(uid)
+                    category = tags.get("amenity") or tags.get("shop") or "food"
+                    addr_parts = [
+                        tags.get("addr:housenumber"), tags.get("addr:street"),
+                        tags.get("addr:building"), tags.get("addr:unit"),
+                        tags.get("addr:suburb") or tags.get("addr:neighbourhood"),
+                        tags.get("addr:postcode"),
+                    ]
+                    address = ", ".join(dict.fromkeys(x for x in addr_parts if x)) or "Not listed"
+                    places.append({
+                        "id": uid, "name": name,
+                        "category": category.replace("_", " ").title(),
+                        "lat": p_lat, "lon": p_lon, "address": address,
+                        "cuisine": tags.get("cuisine", "").replace("_", ", ").title(),
+                        "website": tags.get("website") or tags.get("contact:website", ""),
+                        "phone": tags.get("phone") or tags.get("contact:phone", ""),
+                        "opening_hours": tags.get("opening_hours", ""),
+                        "source_price": tags.get("price", ""),
+                        "osm_url": f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
+                    })
+                return places
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                last_error = str(exc)[:250]
+                if attempt == 0:
+                    time.sleep(0.8)
                 else:
-                    continue
-                osm_type, osm_id = item.get("type", "node"), item.get("id")
-                uid = f"{osm_type}/{osm_id}"
-                if uid in seen:
-                    continue
-                seen.add(uid)
-                category = tags.get("amenity") or tags.get("shop") or "food"
-                addr_parts = [
-                    tags.get("addr:housenumber"), tags.get("addr:street"),
-                    tags.get("addr:building"), tags.get("addr:unit"),
-                    tags.get("addr:suburb") or tags.get("addr:neighbourhood"),
-                    tags.get("addr:postcode"),
-                ]
-                address = ", ".join(dict.fromkeys(x for x in addr_parts if x)) or "Not listed"
-                places.append({
-                    "id": uid, "name": name,
-                    "category": category.replace("_", " ").title(),
-                    "lat": p_lat, "lon": p_lon, "address": address,
-                    "cuisine": tags.get("cuisine", "").replace("_", ", ").title(),
-                    "website": tags.get("website") or tags.get("contact:website", ""),
-                    "phone": tags.get("phone") or tags.get("contact:phone", ""),
-                    "opening_hours": tags.get("opening_hours", ""),
-                    "source_price": tags.get("price", ""),
-                    "osm_url": f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
-                })
-            return places
-        except (requests.RequestException, ValueError) as exc:
-            last_error = str(exc)
-            time.sleep(0.25)
-    raise RuntimeError(last_error or "All public data servers are unavailable.")
+                    break
+    raise RuntimeError(last_error)
 
 
 def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -244,6 +255,8 @@ with st.sidebar:
     )
     radius = {"5 min · 400 m":400, "10 min · 800 m":800, "15 min · 1.2 km":1200, "20 min · 1.6 km":1600}[radius_choice]
     search = st.button("Find food nearby", type="primary", use_container_width=True)
+    if search:
+        st.session_state.run_search = True
     st.caption("Location search: OneMap. Restaurant discovery: OpenStreetMap contributors.")
     st.divider()
     uploaded = st.file_uploader("Import your saved corrections CSV", type=["csv"])
@@ -254,7 +267,7 @@ with st.sidebar:
         except Exception:
             st.error("That CSV could not be read.")
 
-if search:
+if st.session_state.pop("run_search", False):
     if not office_query.strip():
         st.warning("Choose an MRT station or enter an office/building name in the sidebar.")
     else:
@@ -264,8 +277,16 @@ if search:
             if not office:
                 st.warning("Location not found. Try a nearby MRT station or building name.")
             else:
-                with st.spinner("Finding nearby mapped eateries…"):
-                    found = discover_places(office["lat"], office["lon"], radius)
+                try:
+                    with st.spinner("Finding nearby mapped eateries…"):
+                        found = discover_places(office["lat"], office["lon"], radius)
+                except RuntimeError:
+                    # Public endpoints may struggle with large requests; make one smaller-area attempt.
+                    if radius > 400:
+                        with st.spinner("Trying a smaller search area…"):
+                            found = discover_places(office["lat"], office["lon"], max(400, radius // 2))
+                    else:
+                        raise
                 for place in found:
                     place["distance_km"] = distance_km(office["lat"], office["lon"], place["lat"], place["lon"])
                 found = apply_overrides(found)
@@ -274,8 +295,12 @@ if search:
                 st.session_state.search_label = office_query.strip()
         except requests.RequestException:
             st.error("The location service is temporarily unavailable. Please retry shortly.")
-        except RuntimeError:
-            st.error("Restaurant data services are busy. Wait a little or try a smaller radius.")
+        except RuntimeError as exc:
+            st.error("Restaurant data services are temporarily unavailable after trying several servers. Your app is still running; this is usually a public data-service issue.")
+            st.caption(f"Technical detail: {str(exc)[:180]}")
+            if st.button("↻ Retry restaurant search", key="retry_restaurant_search", use_container_width=True):
+                st.session_state.run_search = True
+                st.rerun()
 
 places = apply_overrides(st.session_state.places) if st.session_state.places else []
 st.session_state.places = places
