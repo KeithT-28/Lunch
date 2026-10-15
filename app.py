@@ -1,4 +1,5 @@
 import math
+import re
 import time
 from typing import Any
 
@@ -24,11 +25,35 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 1.6rem; padding-bottom: 2.5rem;}
-      .hero {padding: 1.25rem 1.4rem; border-radius: 16px;
-             background: linear-gradient(120deg, rgba(14,116,144,.16), rgba(22,163,74,.10));
-             border: 1px solid rgba(128,128,128,.25); margin-bottom: 1rem;}
-      .muted {opacity: .75; font-size: .9rem;}
+      .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1100px;}
+      [data-testid="stSidebar"] {border-right: 1px solid rgba(128,128,128,.18);}
+      .hero {
+        padding: 1.35rem 1.4rem; border-radius: 20px;
+        background: linear-gradient(125deg, #102a2a 0%, #164e45 48%, #1d7664 100%);
+        color: white; margin-bottom: .8rem;
+        box-shadow: 0 8px 24px rgba(10, 70, 60, .14);
+      }
+      .hero h1 {font-size: clamp(1.8rem, 5vw, 2.5rem); letter-spacing: -.04em;}
+      .hero p {color: rgba(255,255,255,.84); font-size: 1rem;}
+      div[data-testid="stMetric"] {
+        background: rgba(128,128,128,.06); border: 1px solid rgba(128,128,128,.16);
+        padding: .8rem 1rem; border-radius: 14px;
+      }
+      div[data-testid="stMetricLabel"] {font-size: .85rem;}
+      div[data-testid="stExpander"] {
+        border: 1px solid rgba(128,128,128,.23); border-radius: 14px;
+        overflow: hidden; margin-bottom: .5rem;
+      }
+      div.stButton > button {border-radius: 12px; min-height: 2.7rem;}
+      div.stButton > button[kind="primary"] {
+        background: #176b5b; border-color: #176b5b; color: white;
+      }
+      a {text-underline-offset: 3px;}
+      .small-note {opacity: .72; font-size: .85rem;}
+      @media (max-width: 640px) {
+        .block-container {padding-left: .85rem; padding-right: .85rem;}
+        .hero {padding: 1.05rem 1rem; border-radius: 16px;}
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -38,13 +63,13 @@ st.markdown(
     f"""
     <div class="hero">
       <h1 style="margin:0;">🍜 {APP_TITLE}</h1>
-      <p style="margin:.45rem 0 0 0;">Less scrolling. More lunch. Find food near your office.</p>
+      <p style="margin:.45rem 0 0 0;">Good food, less decision fatigue.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-st.caption("Prototype • Restaurant data from OpenStreetMap • Works in a mobile browser")
+st.caption("YOUR OFFICE LUNCH COMPANION  ·  Singapore")
 
 if "places" not in st.session_state:
     st.session_state.places = []
@@ -125,8 +150,7 @@ def discover_places(lat: float, lon: float, radius_m: int) -> list[dict[str, Any
                 seen.add(unique_key)
 
                 category = (
-                    tags.get("cuisine")
-                    or tags.get("amenity")
+                    tags.get("amenity")
                     or tags.get("shop")
                     or "food"
                 )
@@ -179,6 +203,28 @@ def clean_text(value: Any, fallback: str = "Not listed") -> str:
     return str(value)
 
 
+def price_band(value: Any) -> str:
+    """Classify only explicit numeric price tags; never guess missing prices."""
+    if value is None or str(value).strip() == "":
+        return "Unknown"
+    raw = str(value).strip().lower()
+    # Only create SGD budget bands when the source explicitly identifies SGD.
+    # Generic numbers or "$" can mean different currencies or price scales.
+    if "sgd" not in raw and "s$" not in raw:
+        return "Listed (unclassified)"
+    numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", raw)]
+    if not numbers:
+        return "Listed (unclassified)"
+    amount = max(numbers)
+    if amount < 10:
+        return "Under S$10"
+    if amount <= 20:
+        return "S$10–20"
+    if amount <= 40:
+        return "S$21–40"
+    return "Over S$40"
+
+
 with st.sidebar:
     st.header("Find your lunch")
     office_query = st.text_input(
@@ -218,10 +264,10 @@ with st.sidebar:
         help="Options depend on cuisine information available in OpenStreetMap.",
     )
     price_filter = st.selectbox(
-        "Price information",
-        ["Any price information", "Price listed only", "Price not listed"],
+        "Budget",
+        ["Any budget", "Under S$10", "S$10–20", "S$21–40", "Over S$40", "Price listed (currency unclear)", "Price not listed"],
         index=0,
-        help="Only uses price data explicitly tagged in OpenStreetMap; many places may not have it.",
+        help="Budget bands are assigned only when OpenStreetMap has a numeric price tag. Missing prices are not guessed.",
     )
     name_filter = st.text_input("Name contains", placeholder="e.g. toast")
     show_map = st.checkbox("Show map (may load slower)", value=False)
@@ -272,13 +318,15 @@ if places:
         selected_cuisines = {item.lower() for item in cuisine_filter}
         cuisine_match = not selected_cuisines or bool(place_cuisines & selected_cuisines)
 
-        has_price = bool(place.get("price") and str(place["price"]).strip())
-        if price_filter == "Price listed only":
-            price_match = has_price
-        elif price_filter == "Price not listed":
-            price_match = not has_price
-        else:
+        band = price_band(place.get("price"))
+        if price_filter == "Any budget":
             price_match = True
+        elif price_filter == "Price not listed":
+            price_match = band == "Unknown"
+        elif price_filter == "Price listed (currency unclear)":
+            price_match = band == "Listed (unclassified)"
+        else:
+            price_match = band == price_filter
 
         name_match = not name_filter.strip() or name_filter.strip().lower() in place["name"].lower()
         if category_match and cuisine_match and price_match and name_match:
@@ -291,9 +339,10 @@ if places:
 
     with all_tab:
         st.caption(f"Area: {st.session_state.last_search_label} · Sorted by distance")
-        c1, c2 = st.columns(2)
-        c1.metric("Matching places", len(filtered))
-        c2.metric("Saved places", sum(1 for p in places if p["id"] in st.session_state.favorites))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Matches", len(filtered))
+        c2.metric("Saved", sum(1 for p in places if p["id"] in st.session_state.favorites))
+        c3.metric("Search radius", f"{st.session_state.get('last_radius', radius)} m")
         if show_map and office_location:
             with st.expander("Map view", expanded=True):
                 map_places = filtered[:40]
@@ -307,7 +356,7 @@ if places:
         else:
             # Render a capped list to keep mobile scrolling and Streamlit reruns light.
             display_limit = 30
-            st.caption(f"Showing up to {display_limit} results to keep the page responsive.")
+            st.caption(f"NEARBY PICKS  ·  Showing up to {display_limit} places for a smoother mobile experience.")
             for place in filtered[:display_limit]:
                 saved = place["id"] in st.session_state.favorites
                 title = f"{'⭐ ' if saved else ''}{place['name']} · {place['distance_km']:.2f} km"
@@ -318,7 +367,9 @@ if places:
                     details = []
                     if place["opening_hours"]:
                         details.append(f"Hours: {place['opening_hours']}")
-                    details.append(f"Price range: {place['price'] if place['price'] else 'Not listed'}")
+                    details.append(f"Budget: {price_band(place['price'])}")
+                    if place["price"]:
+                        details.append(f"Source price tag: {place['price']}")
                     if place["phone"]:
                         details.append(f"Phone: {place['phone']}")
                     st.caption(" · ".join(details) if details else "Hours, price and contact details not listed")
@@ -342,7 +393,9 @@ if places:
             for place in fav_places:
                 with st.expander(f"⭐ {place['name']} · {place['distance_km']:.2f} km", expanded=False):
                     st.write(f"**Food type:** {place['category']} · **Cuisine:** {place['cuisine'] if place['cuisine'] else 'Not listed'}")
-                    st.write(f"**Price range:** {place['price'] if place['price'] else 'Not listed'}")
+                    st.write(f"**Budget:** {price_band(place['price'])}")
+                    if place["price"]:
+                        st.caption(f"Source price tag: {place['price']}")
                     st.write(f"**Address:** {place['address']}")
                     st.markdown(f"[Open in Google Maps](https://www.google.com/maps/search/?api=1&query={place['lat']},{place['lon']})")
                     if st.button("Remove saved place", key=f"remove_{place['id']}"):
@@ -374,6 +427,6 @@ with st.expander("About the data and privacy"):
     st.write(
         "Location search uses OpenStreetMap's Nominatim service and nearby food discovery uses the Overpass API. "
         "Your typed location is sent to Nominatim to find coordinates. The app does not request your phone GPS. "
-        "Community data may be incomplete, and current opening status is not verified. Cuisine and price ranges appear only when explicitly tagged; many places may show 'Not listed'."
+        "Community data may be incomplete, and current opening status is not verified. Cuisine and price tags appear only when explicitly mapped. Budget bands are derived only when a price tag explicitly identifies SGD; other price tags are shown as currency unclear, and many places may have no price data."
     )
     st.write("Favourites currently last for the active Streamlit session. Permanent cross-device storage is a future improvement.")
