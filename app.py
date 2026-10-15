@@ -7,7 +7,8 @@ import requests
 import streamlit as st
 
 APP_TITLE = "Lunch Roulette SG"
-USER_AGENT = "LunchRouletteSG/0.3 (personal lunch discovery app)"
+USER_AGENT = "LunchRouletteSG/0.4 (personal lunch discovery app; photo attribution enabled)"
+COMMONS_API_URL = "https://commons.wikimedia.org/w/api.php"
 ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
@@ -250,6 +251,85 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2*r*math.asin(math.sqrt(a))
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def commons_search_photo(search_term: str, mode: str = "place") -> dict[str, str] | None:
+    """Search Wikimedia Commons; cuisine results are illustrative, not venue photos."""
+    term = str(search_term or "").strip()
+    if not term:
+        return None
+    search_text = f'"{term}" Singapore' if mode == "place" else term
+    params = {
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": f"filetype:bitmap {search_text}", "gsrnamespace": 6,
+        "gsrlimit": 8, "prop": "imageinfo",
+        "iiprop": "url|extmetadata", "iiurlwidth": 360,
+    }
+    try:
+        response = requests.get(COMMONS_API_URL, params=params,
+                                headers={"User-Agent": USER_AGENT}, timeout=(3, 7))
+        response.raise_for_status()
+        pages = response.json().get("query", {}).get("pages", {})
+    except (requests.RequestException, ValueError, TypeError):
+        return None
+
+    term_words = {w.casefold() for w in term.replace("-", " ").split() if len(w) > 2}
+    for page in pages.values():
+        title = str(page.get("title", ""))
+        info_list = page.get("imageinfo", [])
+        if not info_list:
+            continue
+        info = info_list[0]
+        meta = info.get("extmetadata", {})
+        description = (title + " " + str(meta.get("ImageDescription", {}).get("value", ""))).casefold()
+        if mode == "place" and (not term_words or not all(word in description for word in term_words)):
+            continue
+        thumb = info.get("thumburl") or info.get("url")
+        if not thumb or not str(thumb).startswith("https://"):
+            continue
+        return {
+            "url": str(thumb),
+            "page_url": str(info.get("descriptionurl") or "https://commons.wikimedia.org/"),
+            "title": title.replace("File:", "", 1),
+            "artist": str(meta.get("Artist", {}).get("value", "")),
+            "license": str(meta.get("LicenseShortName", {}).get("value", "")),
+            "kind": "restaurant" if mode == "place" else "illustrative",
+        }
+    return None
+
+
+def photo_for_place(place: dict[str, Any], lookup_place_photo: bool = False) -> dict[str, str] | None:
+    """Prefer OSM/user photos, then a possible Commons match, then cuisine imagery."""
+    direct = str(place.get("image_url") or "").strip()
+    if direct.startswith("https://"):
+        return {"url": direct, "page_url": place.get("osm_url", "https://www.openstreetmap.org/"),
+                "title": "Photo linked from map data or your correction", "artist": "",
+                "license": "Check original source", "kind": "mapped"}
+    if lookup_place_photo:
+        match = commons_search_photo(str(place.get("name", "")), "place")
+        if match:
+            return match
+    cuisine = str(place.get("cuisine") or "").strip().casefold()
+    if any(x in cuisine for x in ("singapore", "malay", "hawker", "chinese")):
+        query = "Singapore hawker food"
+    elif any(x in cuisine for x in ("japanese", "sushi", "ramen")):
+        query = "Japanese cuisine food"
+    elif "korean" in cuisine:
+        query = "Korean cuisine food"
+    elif "indian" in cuisine:
+        query = "Indian cuisine food"
+    elif "thai" in cuisine:
+        query = "Thai cuisine food"
+    elif "vietnamese" in cuisine:
+        query = "Vietnamese cuisine food"
+    elif any(x in cuisine for x in ("italian", "pizza", "pasta")):
+        query = "Italian cuisine food"
+    elif any(x in cuisine for x in ("western", "burger", "american")):
+        query = "burger western food"
+    else:
+        query = "restaurant meal food"
+    return commons_search_photo(query, "cuisine")
+
+
 def maps_url(place: dict[str, Any]) -> str:
     return f"https://www.google.com/maps/search/?api=1&query={place['lat']},{place['lon']}"
 
@@ -401,9 +481,12 @@ with discover_tab:
             st.session_state.visible_place_count = 30
         # Reset the visible cap when the current result set is smaller than the cap.
         visible_count = min(st.session_state.visible_place_count, len(filtered))
-        for place in filtered[:visible_count]:
+        for card_index, place in enumerate(filtered[:visible_count]):
             is_saved = place["id"] in st.session_state.favourites
             price = place.get("budget_band", "Unknown")
+            # Limit exact venue-photo lookups to the first 8 cards; all Commons
+            # results are cached for 24 hours to keep public-service traffic low.
+            photo = photo_for_place(place, lookup_place_photo=(card_index < 8))
             if price in PRICE_GUIDE:
                 price_html = f"<span class='price-badge'>{price}</span> <span class='place-meta'>Your estimate</span>"
             else:
@@ -415,9 +498,11 @@ with discover_tab:
             with st.container(border=True):
                 image_col, info_col, heart_col = st.columns([0.85, 4.0, 0.45], vertical_alignment="top")
                 with image_col:
-                    if image_url.startswith(("https://", "http://")):
+                    if photo and photo.get("url"):
                         try:
-                            st.image(image_url, width=76)
+                            st.image(photo["url"], width=76)
+                            if photo.get("kind") == "illustrative":
+                                st.caption("Example")
                         except Exception:
                             st.markdown("<div class='food-thumb'>🍜</div>", unsafe_allow_html=True)
                     else:
@@ -444,9 +529,18 @@ with discover_tab:
                         st.write(f"**Your note:** {place['notes']}")
                     if place.get("website"):
                         st.markdown(f"[Restaurant website ↗]({place['website']})")
+                    if photo and photo.get("page_url"):
+                        if photo.get("kind") == "illustrative":
+                            st.caption("Illustrative cuisine photo — not verified as this restaurant.")
+                        elif photo.get("kind") == "restaurant":
+                            st.caption("Possible restaurant photo from Wikimedia Commons; verify the match at the source.")
+                        else:
+                            st.caption("Photo linked from map data or your own correction.")
+                        credits = [x for x in [photo.get("artist"), photo.get("license")] if x]
+                        if credits:
+                            st.caption("Photo credit / licence: " + " · ".join(credits))
+                        st.markdown(f"[Photo source ↗]({photo['page_url']})")
                     st.markdown(f"[Check Google Maps ↗]({maps_url(place)}) · [OpenStreetMap source ↗]({place['osm_url']})")
-                    if image_url:
-                        st.caption("Image supplied by mapped data or your own image URL.")
                     if st.button("Edit details", key=f"editgo_{place['id']}", use_container_width=True):
                         st.session_state.edit_place_id = place["id"]
                         st.info("Open Manage Places to edit this listing.")
@@ -542,7 +636,7 @@ with manage_tab:
 
 with st.expander("Data sources, limitations and privacy"):
     st.write("Restaurant discovery uses OpenStreetMap community data via Overpass. Office/building lookup uses OneMap Search. Search services are public and can occasionally be busy.")
-    st.write("Restaurant photos are shown only when an image URL is present in OpenStreetMap tags or you add one yourself in Manage Places; the app does not scrape Google Maps or automatically fetch Google restaurant photos.")
+    st.write("Photos prefer image URLs present in OpenStreetMap tags or ones you add yourself. If none exists, the app may search Wikimedia Commons for a possible restaurant-name match on the first few cards, then use a cached illustrative cuisine photo when available. Commons matches can be imperfect; illustrative images are labelled and are not claimed to depict the restaurant. Photo source links and available attribution/licence metadata appear in Details. The app does not scrape Google Maps.")
     st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands shown on cards are personal estimates entered by you; public map data rarely includes reliable meal prices. Unknown prices are labelled rather than guessed.")
     st.write("Your typed location is sent to OneMap to find coordinates. The app does not request your phone's GPS.")
     st.markdown("[OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [OneMap API terms](https://www.onemap.gov.sg/legal/apitermsofservice.html) · [Google Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)")
