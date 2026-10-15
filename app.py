@@ -46,12 +46,17 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🍜", layout="wide")
 
 st.markdown("""
 <style>
-.block-container {padding-top:1.2rem; padding-bottom:2.2rem; max-width:1100px;}
+.block-container {padding-top:.7rem; padding-bottom:1.5rem; max-width:1000px; padding-left:1rem; padding-right:1rem;}
 .hero {background:linear-gradient(120deg,#143c35,#347765);padding:1.25rem 1.3rem;
        border-radius:18px;color:white;margin-bottom:1rem;}
 .hero h1 {font-size:clamp(1.6rem,5vw,2.4rem);margin:0;}
 .hero p {color:#dcebe6;margin:.35rem 0 0 0;}
-div[data-testid="stMetric"] {background:rgba(100,120,120,.08);padding:12px;border-radius:12px;}
+div[data-testid="stMetric"] {background:rgba(100,120,120,.08);padding:10px;border-radius:12px;}
+@media (max-width: 640px) {
+  .block-container {padding-left:.65rem; padding-right:.65rem;}
+  div[data-testid="stVerticalBlockBorderWrapper"] {border-radius:13px;}
+  div[data-testid="stButton"] button {min-height:2.65rem;}
+}
 div[data-testid="stExpander"] {border-radius:12px;}
 .small-muted {color:#777;font-size:.85rem;}
 .price-badge {display:inline-block;background:#e0eee5;color:#205a3e;border-radius:8px;padding:3px 10px;font-weight:750;font-size:1rem;letter-spacing:.04em;}
@@ -264,7 +269,7 @@ discover_tab, saved_tab, manage_tab = st.tabs(["🔎 Discover Food", "❤️ My 
 
 with discover_tab:
     st.markdown("### Find your next lunch")
-    st.caption("Pick a station, set your budget and compare nearby places at a glance.")
+    st.caption("Choose where to start, then browse nearby food in one clean list.")
 
     station_names = sorted(set(x.strip() for x in MRT_STATIONS))
     if "location_mode" not in st.session_state:
@@ -299,17 +304,12 @@ with discover_tab:
         if st.button("Find lunch", type="primary", use_container_width=True):
             st.session_state.run_search = True
 
-    st.markdown("**Budget per person**")
-    price_filter = st.radio(
-        "Budget per person", ["Any budget", "$", "$$", "$$$", "$$$$"],
-        horizontal=True, label_visibility="collapsed", key="price_filter"
-    )
-    with st.expander("Quick filters", expanded=False):
+    with st.expander("Filters and display", expanded=False):
         cuisine_values = sorted({x.strip() for p in st.session_state.places for x in p.get("cuisine", "").split(",") if x.strip()})
         chosen_cuisines = st.multiselect("Cuisine", cuisine_values, placeholder="Any cuisine")
         type_values = sorted({p["category"] for p in st.session_state.places})
         type_filter = st.selectbox("Food type", ["All types"] + type_values)
-        include_unknown_prices = st.checkbox("Include places without a known price", value=False)
+        sort_choice = st.selectbox("Sort results", ["Nearest first", "Name A–Z", "Random order"])
         show_map = st.checkbox("Show map", value=False)
 
     if st.session_state.pop("run_search", False):
@@ -335,6 +335,7 @@ with discover_tab:
                         place["distance_km"] = distance_km(office["lat"], office["lon"], place["lat"], place["lon"])
                     found = apply_overrides(found)
                     st.session_state.places = sorted(found, key=lambda item: item["distance_km"])
+                    st.session_state.visible_place_count = 30
                     st.session_state.office_location = office
                     st.session_state.search_label = office_query.strip()
             except requests.RequestException:
@@ -351,13 +352,13 @@ with discover_tab:
     saved_count = len(st.session_state.favourites)
     st.caption(f"📍 {st.session_state.search_label or 'Choose a location'}  ·  {len(places)} places found  ·  {saved_count} saved")
 
-    # Default values for the advanced filters when their expander is closed.
+    # Defaults when the collapsed filter panel has not been opened.
     if "chosen_cuisines" not in locals():
         chosen_cuisines = []
     if "type_filter" not in locals():
         type_filter = "All types"
-    if "include_unknown_prices" not in locals():
-        include_unknown_prices = False
+    if "sort_choice" not in locals():
+        sort_choice = "Nearest first"
     if "show_map" not in locals():
         show_map = False
 
@@ -365,11 +366,18 @@ with discover_tab:
     for place in places:
         cuisines = {item.strip().lower() for item in place.get("cuisine", "").split(",") if item.strip()}
         cuisine_ok = not chosen_cuisines or bool(cuisines & {item.lower() for item in chosen_cuisines})
-        budget = place.get("budget_band", "Unknown")
-        budget_ok = price_filter == "Any budget" or budget == price_filter or (include_unknown_prices and budget == "Unknown")
         type_ok = type_filter == "All types" or place["category"] == type_filter
-        if cuisine_ok and budget_ok and type_ok:
+        if cuisine_ok and type_ok:
             filtered.append(place)
+
+    if sort_choice == "Name A–Z":
+        filtered.sort(key=lambda item: item.get("name", "").casefold())
+    elif sort_choice == "Random order":
+        # Deterministic per rerun unless the user requests a new random pick below.
+        import random
+        random.Random(42).shuffle(filtered)
+    else:
+        filtered.sort(key=lambda item: item.get("distance_km", float("inf")))
 
     if show_map and filtered:
         st.map(pd.DataFrame([{"lat": place["lat"], "lon": place["lon"]} for place in filtered]), latitude="lat", longitude="lon")
@@ -377,13 +385,26 @@ with discover_tab:
     if not places:
         st.info("Choose an MRT station above and tap **Find lunch** to discover nearby places.")
     elif not filtered:
-        st.info("No places match those filters. Try Any budget or include places without a known price.")
+        st.info("No places match these filters. Try clearing your cuisine or food-type selections.")
     else:
-        st.markdown(f"### Places to try <span class='place-meta'>({len(filtered)} results · nearest first)</span>", unsafe_allow_html=True)
-        for place in filtered[:40]:
+        active_filter_count = len(chosen_cuisines) + (type_filter != "All types")
+        result_col, sort_col = st.columns([3, 2])
+        with result_col:
+            st.markdown(f"### Nearby food · {len(filtered)}")
+        with sort_col:
+            st.caption(f"{active_filter_count} active filter(s)" if active_filter_count else "All matching places")
+
+        if "visible_place_count" not in st.session_state:
+            st.session_state.visible_place_count = 30
+        # Reset the visible cap when the current result set is smaller than the cap.
+        visible_count = min(st.session_state.visible_place_count, len(filtered))
+        for place in filtered[:visible_count]:
             is_saved = place["id"] in st.session_state.favourites
             price = place.get("budget_band", "Unknown")
-            price_html = f"<span class='price-badge'>{price}</span>" if price in PRICE_GUIDE else "<span class='place-meta'>Price unknown</span>"
+            if price in PRICE_GUIDE:
+                price_html = f"<span class='price-badge'>{price}</span> <span class='place-meta'>Your estimate</span>"
+            else:
+                price_html = "<span class='place-meta'>Price unknown</span>"
             cuisine = place.get("cuisine") or "Cuisine not listed"
             hours = place.get("opening_hours") or "Hours not listed"
             address = place.get("address") or "Address not listed"
@@ -394,20 +415,16 @@ with discover_tab:
                     st.markdown(f"<div class='place-meta'>{cuisine} · {place['distance_km'] * 1000:.0f} m away</div>", unsafe_allow_html=True)
                 with right:
                     st.markdown(price_html, unsafe_allow_html=True)
-                details = []
-                if price in PRICE_GUIDE:
-                    details.append(f"Typical estimate: {PRICE_GUIDE[price]} per person")
                 if place.get("personal_rating"):
-                    details.append(f"Your rating: {place['personal_rating']}/5")
-                else:
-                    details.append("Rating: not available")
-                st.caption(" · ".join(details))
-                with st.expander("Details, hours and directions", expanded=False):
+                    st.caption(f"Your rating: {place['personal_rating']}/5")
+                with st.expander("Details and directions", expanded=False):
                     st.write(f"**Address:** {address}")
                     st.write(f"**Opening hours:** {hours}")
+                    if price in PRICE_GUIDE:
+                        st.write(f"**Your estimated spend:** {PRICE_GUIDE[price]} per person")
                     if place.get("notes"):
                         st.write(f"**Your note:** {place['notes']}")
-                    st.markdown(f"[Directions in Google Maps ↗]({maps_url(place)}) · [OpenStreetMap source ↗]({place['osm_url']})")
+                    st.markdown(f"[Check Google Maps ↗]({maps_url(place)}) · [OpenStreetMap source ↗]({place['osm_url']})")
                 a, b = st.columns(2)
                 with a:
                     if st.button("♥ Saved" if is_saved else "♡ Save", key=f"save_{place['id']}", use_container_width=True):
@@ -420,6 +437,13 @@ with discover_tab:
                     if st.button("Edit details", key=f"editgo_{place['id']}", use_container_width=True):
                         st.session_state.edit_place_id = place["id"]
                         st.info("Open Manage Places to edit this listing.")
+
+        if visible_count < len(filtered):
+            if st.button(f"Load {min(30, len(filtered) - visible_count)} more places", use_container_width=True):
+                st.session_state.visible_place_count = visible_count + 30
+                st.rerun()
+        elif len(filtered) > 30:
+            st.caption("You've reached the end of the matching list.")
 
     if st.button("🎲 Pick a random lunch", use_container_width=True, disabled=not bool(filtered)):
         import random
@@ -436,7 +460,8 @@ with saved_tab:
         for p in saved:
             with st.container(border=True):
                 st.markdown(f"**{p['name']}** · {p['distance_km']:.2f} km")
-                st.caption(f"{p['cuisine'] or 'Cuisine not listed'} · {p.get('budget_band', 'Unknown')} · Your rating: {p.get('personal_rating') or 'Not rated'}")
+                price_label = f"{p.get('budget_band')} · your estimate" if p.get('budget_band') in PRICE_GUIDE else "Price unknown"
+                st.caption(f"{p['cuisine'] or 'Cuisine not listed'} · {price_label} · Your rating: {p.get('personal_rating') or 'Not rated'}")
                 st.markdown(f"[Open in Google Maps ↗]({maps_url(p)})")
                 if p.get("notes"):
                     st.write(p["notes"])
@@ -502,6 +527,6 @@ with manage_tab:
 
 with st.expander("Data sources, limitations and privacy"):
     st.write("Restaurant discovery uses OpenStreetMap community data via Overpass. Office/building lookup uses OneMap Search. Search services are public and can occasionally be busy.")
-    st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands are personal estimates entered by you; public map data rarely includes reliable meal prices. Ratings are not available in this free-only version unless you enter your own.")
+    st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands shown on cards are personal estimates entered by you; public map data rarely includes reliable meal prices. Unknown prices are labelled rather than guessed.")
     st.write("Your typed location is sent to OneMap to find coordinates. The app does not request your phone's GPS.")
     st.markdown("[OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [OneMap API terms](https://www.onemap.gov.sg/legal/apitermsofservice.html) · [Google Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)")
