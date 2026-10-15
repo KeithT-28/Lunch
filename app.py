@@ -14,7 +14,9 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 ]
-BUDGET_BANDS = ["Unknown", "Under S$10", "S$10–20", "S$21–40", "Over S$40"]
+BUDGET_BANDS = ["Unknown", "$", "$$", "$$$", "$$$$"]
+PRICE_GUIDE = {"$": "Under S$10", "$$": "S$10–20", "$$$": "S$21–40", "$$$$": "Over S$40"}
+LEGACY_BUDGETS = {"Under S$10": "$", "S$10–20": "$$", "S$21–40": "$$$", "Over S$40": "$$$$"}
 MRT_STATIONS = [
     "Admiralty", "Aljunied", "Ang Mo Kio", "Bakau", "Balmoral", "Bartley", "Bayfront",
     "Beauty World", "Bedok", "Bedok North", "Bedok Reservoir", "Bencoolen", "Bendemeer",
@@ -52,6 +54,9 @@ st.markdown("""
 div[data-testid="stMetric"] {background:rgba(100,120,120,.08);padding:12px;border-radius:12px;}
 div[data-testid="stExpander"] {border-radius:12px;}
 .small-muted {color:#777;font-size:.85rem;}
+.price-badge {display:inline-block;background:#e0eee5;color:#205a3e;border-radius:8px;padding:3px 10px;font-weight:750;font-size:1rem;letter-spacing:.04em;}
+.place-meta {color:#737780;font-size:.9rem;line-height:1.5;}
+div[data-testid="stRadio"] > div {gap:.35rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,6 +85,7 @@ def normalize_overrides(frame: pd.DataFrame) -> pd.DataFrame:
             frame[col] = ""
     frame = frame[OVERRIDE_COLUMNS].fillna("")
     frame["id"] = frame["id"].astype(str)
+    frame["budget_band"] = frame["budget_band"].replace(LEGACY_BUDGETS)
     return frame.drop_duplicates(subset=["id"], keep="last")
 
 
@@ -241,136 +247,184 @@ def maps_url(place: dict[str, Any]) -> str:
 
 
 with st.sidebar:
-    st.subheader("Lunch search")
-    location_mode = st.radio("Start from", ["Choose an MRT station", "Type an office / building"], index=0)
-    if location_mode == "Choose an MRT station":
-        selected_station = st.selectbox("MRT station", sorted(set(x.strip() for x in MRT_STATIONS)), index=sorted(set(x.strip() for x in MRT_STATIONS)).index("Raffles Place"))
-        office_query = f"{selected_station} MRT Station"
-    else:
-        office_query = st.text_input("Office / building name", placeholder="e.g. One Raffles Place")
-    radius_choice = st.selectbox(
-        "Walking radius",
-        ["5 min · 400 m", "10 min · 800 m", "15 min · 1.2 km", "20 min · 1.6 km"],
-        index=1,
-    )
-    radius = {"5 min · 400 m":400, "10 min · 800 m":800, "15 min · 1.2 km":1200, "20 min · 1.6 km":1600}[radius_choice]
-    search = st.button("Find food nearby", type="primary", use_container_width=True)
-    if search:
-        st.session_state.run_search = True
-    st.caption("Location search: OneMap. Restaurant discovery: OpenStreetMap contributors.")
-    st.divider()
-    uploaded = st.file_uploader("Import your saved corrections CSV", type=["csv"])
+    st.subheader("Your data")
+    st.caption("Import a corrections CSV to restore your own prices, notes and ratings.")
+    uploaded = st.file_uploader("Import corrections CSV", type=["csv"])
     if uploaded is not None:
         try:
             st.session_state.overrides = normalize_overrides(pd.read_csv(uploaded, dtype=str).fillna(""))
             st.success("Your corrections were imported.")
         except Exception:
             st.error("That CSV could not be read.")
+    st.divider()
+    st.caption("Location lookup: OneMap · Restaurant data: OpenStreetMap contributors")
 
-if st.session_state.pop("run_search", False):
-    if not office_query.strip():
-        st.warning("Choose an MRT station or enter an office/building name in the sidebar.")
-    else:
-        try:
-            with st.spinner("Finding your office location…"):
-                office = geocode_place(office_query.strip())
-            if not office:
-                st.warning("Location not found. Try a nearby MRT station or building name.")
-            else:
-                try:
-                    with st.spinner("Finding nearby mapped eateries…"):
-                        found = discover_places(office["lat"], office["lon"], radius)
-                except RuntimeError:
-                    # Public endpoints may struggle with large requests; make one smaller-area attempt.
-                    if radius > 400:
-                        with st.spinner("Trying a smaller search area…"):
-                            found = discover_places(office["lat"], office["lon"], max(400, radius // 2))
-                    else:
-                        raise
-                for place in found:
-                    place["distance_km"] = distance_km(office["lat"], office["lon"], place["lat"], place["lon"])
-                found = apply_overrides(found)
-                st.session_state.places = sorted(found, key=lambda p: p["distance_km"])
-                st.session_state.office_location = office
-                st.session_state.search_label = office_query.strip()
-        except requests.RequestException:
-            st.error("The location service is temporarily unavailable. Please retry shortly.")
-        except RuntimeError as exc:
-            st.error("Restaurant data services are temporarily unavailable after trying several servers. Your app is still running; this is usually a public data-service issue.")
-            st.caption(f"Technical detail: {str(exc)[:180]}")
-            if st.button("↻ Retry restaurant search", key="retry_restaurant_search", use_container_width=True):
-                st.session_state.run_search = True
-                st.rerun()
-
-places = apply_overrides(st.session_state.places) if st.session_state.places else []
-st.session_state.places = places
 
 discover_tab, saved_tab, manage_tab = st.tabs(["🔎 Discover Food", "❤️ My Food List", "🛠 Manage Places"])
 
 with discover_tab:
     st.markdown("### Find your next lunch")
-    st.caption("Compare mapped food details, your own budget estimates and personal notes. Unknown information stays clearly marked.")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Places found", len(places))
-    c2.metric("Saved places", len(st.session_state.favourites))
-    c3.metric("Search area", st.session_state.search_label or "Not set")
+    st.caption("Pick a station, set your budget and compare nearby places at a glance.")
 
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        cuisine_values = sorted({x.strip() for p in places for x in p.get("cuisine", "").split(",") if x.strip()})
+    station_names = sorted(set(x.strip() for x in MRT_STATIONS))
+    if "location_mode" not in st.session_state:
+        st.session_state.location_mode = "Choose an MRT station"
+    if "selected_station" not in st.session_state:
+        st.session_state.selected_station = "Raffles Place"
+    if "radius_choice" not in st.session_state:
+        st.session_state.radius_choice = "10 min · 800 m"
+
+    with st.container(border=True):
+        st.markdown("**📍 Location**")
+        location_mode = st.radio(
+            "Start from", ["Choose an MRT station", "Type an office / building"],
+            horizontal=True, key="location_mode", label_visibility="collapsed"
+        )
+        if location_mode == "Choose an MRT station":
+            selected_station = st.selectbox(
+                "MRT station", station_names,
+                index=station_names.index(st.session_state.selected_station) if st.session_state.selected_station in station_names else station_names.index("Raffles Place"),
+                key="selected_station"
+            )
+            office_query = f"{selected_station} MRT Station"
+        else:
+            office_query = st.text_input("Office / building name", placeholder="e.g. One Raffles Place", key="office_query")
+
+        radius_choice = st.selectbox(
+            "Search distance", ["5 min · 400 m", "10 min · 800 m", "15 min · 1.2 km", "20 min · 1.6 km"],
+            index=["5 min · 400 m", "10 min · 800 m", "15 min · 1.2 km", "20 min · 1.6 km"].index(st.session_state.radius_choice),
+            key="radius_choice"
+        )
+        radius = {"5 min · 400 m": 400, "10 min · 800 m": 800, "15 min · 1.2 km": 1200, "20 min · 1.6 km": 1600}[radius_choice]
+        if st.button("Find lunch", type="primary", use_container_width=True):
+            st.session_state.run_search = True
+
+    st.markdown("**Budget per person**")
+    price_filter = st.radio(
+        "Budget per person", ["Any budget", "$", "$$", "$$$", "$$$$"],
+        horizontal=True, label_visibility="collapsed", key="price_filter"
+    )
+    with st.expander("Quick filters", expanded=False):
+        cuisine_values = sorted({x.strip() for p in st.session_state.places for x in p.get("cuisine", "").split(",") if x.strip()})
         chosen_cuisines = st.multiselect("Cuisine", cuisine_values, placeholder="Any cuisine")
-    with f2:
-        budget_filter = st.selectbox("Budget", ["Any budget"] + BUDGET_BANDS)
-    with f3:
-        type_filter = st.selectbox("Food type", ["All types"] + sorted({p["category"] for p in places}))
+        type_values = sorted({p["category"] for p in st.session_state.places})
+        type_filter = st.selectbox("Food type", ["All types"] + type_values)
+        include_unknown_prices = st.checkbox("Include places without a known price", value=False)
+        show_map = st.checkbox("Show map", value=False)
 
-    show_map = st.checkbox("Show map", value=False)
+    if st.session_state.pop("run_search", False):
+        if not office_query.strip():
+            st.warning("Choose an MRT station or enter an office/building name.")
+        else:
+            try:
+                with st.spinner("Finding your location…"):
+                    office = geocode_place(office_query.strip())
+                if not office:
+                    st.warning("Location not found. Try a nearby MRT station or building name.")
+                else:
+                    try:
+                        with st.spinner("Finding nearby places…"):
+                            found = discover_places(office["lat"], office["lon"], radius)
+                    except RuntimeError:
+                        if radius > 400:
+                            with st.spinner("Trying a smaller search area…"):
+                                found = discover_places(office["lat"], office["lon"], max(400, radius // 2))
+                        else:
+                            raise
+                    for place in found:
+                        place["distance_km"] = distance_km(office["lat"], office["lon"], place["lat"], place["lon"])
+                    found = apply_overrides(found)
+                    st.session_state.places = sorted(found, key=lambda item: item["distance_km"])
+                    st.session_state.office_location = office
+                    st.session_state.search_label = office_query.strip()
+            except requests.RequestException:
+                st.error("The location service is temporarily unavailable. Please try again.")
+            except RuntimeError as exc:
+                st.error("Restaurant data services are temporarily unavailable. Your app is still running; please retry shortly.")
+                st.caption(f"Technical detail: {str(exc)[:180]}")
+                if st.button("↻ Retry restaurant search", key="retry_restaurant_search", use_container_width=True):
+                    st.session_state.run_search = True
+                    st.rerun()
+
+    places = apply_overrides(st.session_state.places) if st.session_state.places else []
+    st.session_state.places = places
+    saved_count = len(st.session_state.favourites)
+    st.caption(f"📍 {st.session_state.search_label or 'Choose a location'}  ·  {len(places)} places found  ·  {saved_count} saved")
+
+    # Default values for the advanced filters when their expander is closed.
+    if "chosen_cuisines" not in locals():
+        chosen_cuisines = []
+    if "type_filter" not in locals():
+        type_filter = "All types"
+    if "include_unknown_prices" not in locals():
+        include_unknown_prices = False
+    if "show_map" not in locals():
+        show_map = False
+
     filtered = []
-    for p in places:
-        pcs = {x.strip().lower() for x in p.get("cuisine", "").split(",") if x.strip()}
-        cuisine_ok = not chosen_cuisines or bool(pcs & {x.lower() for x in chosen_cuisines})
-        budget_ok = budget_filter == "Any budget" or p.get("budget_band", "Unknown") == budget_filter
-        type_ok = type_filter == "All types" or p["category"] == type_filter
+    for place in places:
+        cuisines = {item.strip().lower() for item in place.get("cuisine", "").split(",") if item.strip()}
+        cuisine_ok = not chosen_cuisines or bool(cuisines & {item.lower() for item in chosen_cuisines})
+        budget = place.get("budget_band", "Unknown")
+        budget_ok = price_filter == "Any budget" or budget == price_filter or (include_unknown_prices and budget == "Unknown")
+        type_ok = type_filter == "All types" or place["category"] == type_filter
         if cuisine_ok and budget_ok and type_ok:
-            filtered.append(p)
+            filtered.append(place)
 
     if show_map and filtered:
-        map_df = pd.DataFrame([{"lat": p["lat"], "lon": p["lon"]} for p in filtered])
-        st.map(map_df, latitude="lat", longitude="lon")
+        st.map(pd.DataFrame([{"lat": place["lat"], "lon": place["lon"]} for place in filtered]), latitude="lat", longitude="lon")
 
     if not places:
-        st.info("Choose an MRT station or enter your office/building in the sidebar, then tap **Find food nearby**.")
+        st.info("Choose an MRT station above and tap **Find lunch** to discover nearby places.")
     elif not filtered:
-        st.info("No places match these filters. Try widening the filters.")
+        st.info("No places match those filters. Try Any budget or include places without a known price.")
     else:
-        st.caption(f"Showing {len(filtered)} places · sorted by straight-line distance")
-        for p in filtered[:40]:
-            is_saved = p["id"] in st.session_state.favourites
-            with st.expander(f"{p['name']}  ·  {p['distance_km']:.2f} km", expanded=False):
-                st.markdown(f"**{p['category']}** · **Cuisine:** {p.get('cuisine') or 'Not listed'}")
-                st.markdown(f"**Budget:** {p.get('budget_band', 'Unknown')} · **Your rating:** {p.get('personal_rating') or 'Not rated'}")
-                st.caption(f"Address: {p['address']} · Hours: {p.get('opening_hours') or 'Not listed'}")
-                if p.get("notes"):
-                    st.write(f"Your note: {p['notes']}")
-                st.markdown(f"[Open in Google Maps ↗]({maps_url(p)}) · [OpenStreetMap source ↗]({p['osm_url']})")
-                left, right = st.columns(2)
+        st.markdown(f"### Places to try <span class='place-meta'>({len(filtered)} results · nearest first)</span>", unsafe_allow_html=True)
+        for place in filtered[:40]:
+            is_saved = place["id"] in st.session_state.favourites
+            price = place.get("budget_band", "Unknown")
+            price_html = f"<span class='price-badge'>{price}</span>" if price in PRICE_GUIDE else "<span class='place-meta'>Price unknown</span>"
+            cuisine = place.get("cuisine") or "Cuisine not listed"
+            hours = place.get("opening_hours") or "Hours not listed"
+            address = place.get("address") or "Address not listed"
+            with st.container(border=True):
+                left, right = st.columns([4, 1])
                 with left:
-                    if st.button("Remove saved" if is_saved else "♡ Save place", key=f"save_{p['id']}", use_container_width=True):
-                        if is_saved:
-                            st.session_state.favourites.remove(p["id"])
-                        else:
-                            st.session_state.favourites.add(p["id"])
-                        st.rerun()
+                    st.markdown(f"**{place['name']}**")
+                    st.markdown(f"<div class='place-meta'>{cuisine} · {place['distance_km'] * 1000:.0f} m away</div>", unsafe_allow_html=True)
                 with right:
-                    if st.button("Edit details", key=f"editgo_{p['id']}", use_container_width=True):
-                        st.session_state.edit_place_id = p["id"]
-                        st.info("Open the Manage Places tab to edit this entry.")
+                    st.markdown(price_html, unsafe_allow_html=True)
+                details = []
+                if price in PRICE_GUIDE:
+                    details.append(f"Typical estimate: {PRICE_GUIDE[price]} per person")
+                if place.get("personal_rating"):
+                    details.append(f"Your rating: {place['personal_rating']}/5")
+                else:
+                    details.append("Rating: not available")
+                st.caption(" · ".join(details))
+                with st.expander("Details, hours and directions", expanded=False):
+                    st.write(f"**Address:** {address}")
+                    st.write(f"**Opening hours:** {hours}")
+                    if place.get("notes"):
+                        st.write(f"**Your note:** {place['notes']}")
+                    st.markdown(f"[Directions in Google Maps ↗]({maps_url(place)}) · [OpenStreetMap source ↗]({place['osm_url']})")
+                a, b = st.columns(2)
+                with a:
+                    if st.button("♥ Saved" if is_saved else "♡ Save", key=f"save_{place['id']}", use_container_width=True):
+                        if is_saved:
+                            st.session_state.favourites.remove(place["id"])
+                        else:
+                            st.session_state.favourites.add(place["id"])
+                        st.rerun()
+                with b:
+                    if st.button("Edit details", key=f"editgo_{place['id']}", use_container_width=True):
+                        st.session_state.edit_place_id = place["id"]
+                        st.info("Open Manage Places to edit this listing.")
 
-    st.divider()
     if st.button("🎲 Pick a random lunch", use_container_width=True, disabled=not bool(filtered)):
         import random
         pick = random.choice(filtered)
-        st.success(f"Today's pick: {pick['name']} · {pick['distance_km']:.2f} km away")
+        st.success(f"Today's pick: {pick['name']} · {pick['distance_km'] * 1000:.0f} m away")
         st.markdown(f"[Get directions in Google Maps ↗]({maps_url(pick)})")
 
 with saved_tab:
@@ -448,6 +502,6 @@ with manage_tab:
 
 with st.expander("Data sources, limitations and privacy"):
     st.write("Restaurant discovery uses OpenStreetMap community data via Overpass. Office/building lookup uses OneMap Search. Search services are public and can occasionally be busy.")
-    st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Prices and cuisines are only shown when mapped or entered by you.")
+    st.write("Ratings and review counts from Google Maps are not included in this free-only version. We do not scrape Google Maps. Price bands are personal estimates entered by you; public map data rarely includes reliable meal prices. Ratings are not available in this free-only version unless you enter your own.")
     st.write("Your typed location is sent to OneMap to find coordinates. The app does not request your phone's GPS.")
     st.markdown("[OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [OneMap API terms](https://www.onemap.gov.sg/legal/apitermsofservice.html) · [Google Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)")
