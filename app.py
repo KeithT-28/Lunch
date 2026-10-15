@@ -13,6 +13,7 @@ ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 ]
 
 st.set_page_config(
@@ -128,8 +129,11 @@ def discover_places(lat: float, lon: float, radius_m: int) -> list[dict[str, Any
                 endpoint,
                 data={"data": query},
                 headers={"User-Agent": USER_AGENT},
-                timeout=25,
+                timeout=18,
             )
+            if response.status_code in (429, 502, 503, 504):
+                last_error = RuntimeError(f"Temporary Overpass HTTP {response.status_code}")
+                continue
             response.raise_for_status()
             elements = response.json().get("elements", [])
             places = []
@@ -355,6 +359,7 @@ with st.sidebar:
         except Exception:
             st.error("Could not read that CSV. Use a corrections file exported by this app.")
     search_button = st.button("🔎 Find food nearby", type="primary", use_container_width=True)
+    st.caption("If one public map server is busy, the app will try backup servers automatically.")
     st.divider()
     st.caption("OpenStreetMap data can be incomplete. Search results are cached to reduce repeat requests.")
 
